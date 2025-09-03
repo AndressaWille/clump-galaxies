@@ -1,0 +1,80 @@
+```{r}
+#install.packages('remotes')
+#remotes::install_github("RafaelSdeSouza/capivara")
+#install.packages("FITSio")
+```
+
+```{r}
+library(capivara)
+library(FITSio)
+library(dplyr)
+```
+
+
+For 1 datacube:
+```{r}
+require(capivara)
+cube <- readFITS("cut_cubes/datacube_cut_box_01.fits")
+
+# Apply Capivara segmentation
+result <- capivara::segment(cube,Ncomp=8)
+
+# Plot the segmented region
+plot <- plot_cluster(result)
+print(plot)
+```
+Save results in dataframes:
+```{r}
+cluster_df <- reshape2::melt(result$cluster_map,
+                             varnames = c("x","y"),
+                             value.name = "cluster")
+
+write.csv(cluster_df, "cut_cubes/results/cluster_box_01.csv", row.names = FALSE)
+```
+
+```{r}
+cube <- result$original_cube$imDat
+cube_df <- reshape2::melt(cube, varnames = c("x","y","filter"), value.name = "value")
+
+write.csv(cube_df, "cut_cubes/results/original_cube_box_01.csv", row.names = FALSE)
+```
+
+```{r}
+cluster_ids <- na.omit(unique(cluster_df$cluster))
+cluster_ids <- cluster_ids[!is.na(cluster_ids)]
+
+snr_df <- data.frame(
+  cluster = cluster_ids,
+  snr = result$cluster_snr
+)
+
+write.csv(snr_df, file = "cut_cubes/results/clusters_snr_box_01.csv", row.names = FALSE)
+```
+
+
+For more datacubes:
+```{r}
+datacubes <- list.files("cut_cubes/test/", pattern = "\\.fits$", full.names = TRUE)
+
+for (datacube in datacubes) {
+  name_base <- tools::file_path_sans_ext(basename(datacube)) 
+  
+  cat("File:", name_base, "\n")
+  cube <- readFITS(datacube)
+  result <- capivara::segment(cube, Ncomp = 8)
+
+  plot <- plot_cluster(result)
+  print(plot)
+
+  cluster_df <- reshape2::melt(result$cluster_map,
+                                varnames = c("x","y"),
+                                value.name = "cluster")
+  write.csv(cluster_df, paste0("cut_cubes/test/results/cluster_", name_base, ".csv"), row.names = FALSE)
+
+
+  cube_df <- result$original_cube$imDat
+  cube_df <- reshape2::melt(cube, varnames = c("x","y","filter"), value.name = "value")
+  write.csv(cube_df, paste0("cut_cubes/test/results/original_cube_", name_base, ".csv"), row.names = FALSE)
+}
+```
+

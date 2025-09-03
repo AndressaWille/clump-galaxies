@@ -1,0 +1,187 @@
+
+
+```{r}
+library(sf)
+library(dplyr)
+library(concaveman)
+library(geojsonio)
+library(purrr)
+library(dbscan)
+library(readr)
+```
+Some examples:
+
+- For 1 cluster:
+```{r}
+df_clusters <- read.csv("cut_cubes/results/cluster_box_00.csv")
+df_cluster_8 <- df_clusters %>% filter(cluster == 8)
+pixels <- st_as_sf(df_cluster_8, coords = c("x", "y"), crs = NA)
+clump_geom <- concaveman(pixels)
+plot(clump_geom)
+```
+
+```{r}
+sf::st_geometry_type(clump_geom)
+```
+
+```{r}
+clump_geom
+```
+
+```{r}
+sf::st_write(clump_geom, "clump_cluster_8.geojson")
+```
+
+For 1 cluster that has disconnected regions:
+```{r}
+df_clusters_sf <- st_as_sf(df_clusters, coords = c("x", "y"))
+df_cluster_3 <- df_clusters_sf %>% filter(cluster == 3)
+coords <- st_coordinates(df_cluster_3)
+```
+
+(we have to use dbscan first to to spatially separate disconnected regions that were segmented as belonging to the same cluster)
+```{r}
+db <- dbscan(coords, eps = 2, minPts = 3)
+df <- as.data.frame(coords)
+df$subcluster <- factor(db$cluster)
+df <- df %>% filter(subcluster != 0) #noise
+pixels_db <- st_as_sf(df, coords = c("X", "Y"), crs = NA)
+```
+
+```{r}
+subcluster_polygons <- pixels_db %>%
+  group_split(subcluster) %>%
+  map_dfr(~{
+    cluster_3_db <- concaveman(.x)
+    cluster_3_db$cluster <- unique(.x$subcluster)
+    return(cluster_3_db)
+  })
+```
+
+```{r}
+plot(subcluster_polygons)
+```
+
+```{r}
+multipolygon <- st_combine(subcluster_polygons)
+multipolygon_sf <- st_sf(geometry = multipolygon)
+```
+
+```{r}
+multipolygon_sf
+```
+
+
+
+For more clusters:
+
+(suggestion: if you had to cut your galaxy into more than one region and ran each region separately in capivara, combine the data frames with the result$cluster_map data into a single data frame before using this function.)
+```{r}
+#' From a data frame with 'x', 'y', 'cluster' columns (comes from capivara's result$cluster_map), this function divides the clusters into subclusters with dbscan, creates polygons with concaveman, calculates their areas and centroids, and saves the results in CSV and GeoJSON files.
+#'
+#' @param df_clusters Data frame with columns 'x', 'y', 'cluster'
+#' @param eps DBSCAN parameter `eps` (maximum distance to consider neighboring points) (default: 2)
+#' @param minPts DBSCAN parameter `minPts` (minimum number of points to form a cluster) (default: 3)
+#' @param save_csv Logical; if TRUE, saves CSV files with 'x', 'y', 'cluster' and 'subcluster' (default: TRUE)
+#' @param csv_path Path to save CSV files (used only if save_csv = TRUE; default: NULL uses current directory)
+#' @param save_geojson Logical; if TRUE, saves GeoJSON files with polygons properties (default: TRUE)
+#' @param geojson_path Path to save GeoJSON files (used only if save_geojson = TRUE; default: NULL uses current directory)
+#' @return A list of `sf` objects, one per cluster, containing the polygons of the subclusters
+
+subclusters <- function(df_clusters, eps = 2, minPts = 3, save_csv = TRUE, csv_path = NULL,
+                        save_geojson = TRUE, geojson_path = NULL) {
+  poly_list <- list()
+
+  # Transforms in sf object
+  df_clusters_sf <- st_as_sf(df_clusters, coords = c("x", "y"))
+  df_clusters_sf <- df_clusters_sf %>% filter(!is.na(cluster))
+
+  # Iteration in clusters
+  for (cl in unique(df_clusters_sf$cluster)) {
+    subset <- df_clusters_sf %>% filter(cluster == cl)
+
+    # Get x, y coordinates
+    subset_coords <- st_coordinates(subset)
+    subset$x <- subset_coords[,1]
+    subset$y <- subset_coords[,2]
+
+    # Aplies DBSCAN
+    db <- dbscan(subset_coords, eps = eps, minPts = minPts)
+    subset$subcluster <- db$cluster
+    subset <- subset %>% filter(subcluster != 0)
+
+    # Saves a CSV file with x, y, cluster and subcluster
+    # This part may be useful in other analyses, but if you only want the .geojson files with the polygons properties, this part can be ignored (choose save_csv = FALSE).
+    if (save_csv) {
+      csv_file <- if (!is.null(csv_path)) {
+        file.path(csv_path, paste0("pixels_cluster_", cl, ".csv"))
+      } else {
+        paste0("pixels_cluster_", cl, ".csv")
+      }
+      write.csv(st_drop_geometry(subset), csv_file, row.names = FALSE)
+    }
+
+    # Creates polygons for each subcluster
+    subcluster_polygons <- subset %>%
+      group_split(subcluster) %>%
+      keep(~ nrow(.x) >= 3) %>%
+      map_dfr(~{
+        clumps <- concaveman(.x)
+        clumps$subcluster <- unique(.x$subcluster)
+        return(clumps)
+      })
+
+    # Calculates the centroid of the subcluster
+    centroids_df <- subset %>%
+      st_drop_geometry() %>% 
+      group_by(subcluster) %>%
+      summarise(
+        x_centroid = mean(x),
+        y_centroid = mean(y),
+        .groups = "drop")
+
+    # Gets the cluster
+    subcluster_polygons$cluster <- cl
+    
+    # Calculates the area of the subcluster
+    subcluster_polygons$area_pix <- st_area(subcluster_polygons)
+
+    # Join centroid information
+    subcluster_polygons <- left_join(subcluster_polygons, centroids_df, by = "subcluster")
+
+    # Salves geojson files with polygon geometry, area, centroid
+    if (save_geojson) {
+      geojson_file <- if (!is.null(geojson_path)) {
+        file.path(geojson_path, paste0("cluster_", cl, ".geojson"))
+      } else {
+        paste0("cluster_", cl, ".geojson")
+      }
+      sf::st_write(subcluster_polygons, geojson_file, delete_dsn = TRUE, quiet = TRUE)
+    }
+
+    poly_list[[as.character(cl)]] <- subcluster_polygons
+  }
+
+  return(poly_list)
+}
+
+```
+Feel free to adapt this function and/or add other things, like transforming polygons in multipolygons.
+
+```{r}
+df_clusters <- read.csv("cut_cubes/results/cluster_box_00.csv")
+csv_dir <- "cut_cubes/results/"
+geojson_dir <- "cut_cubes/results/"
+
+polys <- subclusters(df_clusters,
+                      eps = 2,
+                      minPts = 3,
+                      save_csv = TRUE,
+                      csv_path = csv_dir,
+                      save_geojson = TRUE,
+                      geojson_path = geojson_dir)
+```
+```{r}
+polys
+```
+
